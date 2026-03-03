@@ -579,69 +579,67 @@ function createServer() {
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
-  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+  // Si PORT est défini (Railway, cloud) → mode HTTP
+  // Sinon (Claude Desktop, local) → mode stdio
+  if (process.env.PORT) {
+    const PORT = parseInt(process.env.PORT);
+    const app = express();
+    app.use(express.json());
 
-  // Mode HTTP (Railway / déploiement cloud)
-  const app = express();
-  app.use(express.json());
+    app.get("/", (_req, res) => {
+      res.json({ status: "ok", name: "reddit-mcp", version: "1.0.0" });
+    });
 
-  // Health check pour Railway
-  app.get("/", (_req, res) => {
-    res.json({ status: "ok", name: "reddit-mcp", version: "1.0.0" });
-  });
+    const transports = new Map<string, StreamableHTTPServerTransport>();
 
-  // Endpoint MCP — une instance de transport par session (stateful)
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+    app.post("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      let transport: StreamableHTTPServerTransport;
 
-  app.post("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (sessionId && transports.has(sessionId)) {
+        transport = transports.get(sessionId)!;
+      } else {
+        const newSession = randomUUID();
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => newSession,
+          onsessioninitialized: (id) => { transports.set(id, transport); },
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) transports.delete(transport.sessionId);
+        };
+        await createServer().connect(transport);
+      }
 
-    let transport: StreamableHTTPServerTransport;
+      await transport.handleRequest(req, res, req.body);
+    });
 
-    if (sessionId && transports.has(sessionId)) {
-      transport = transports.get(sessionId)!;
-    } else {
-      // Nouvelle session
-      const newSession = randomUUID();
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => newSession,
-        onsessioninitialized: (id) => {
-          transports.set(id, transport);
-        },
-      });
-      transport.onclose = () => {
-        if (transport.sessionId) transports.delete(transport.sessionId);
-      };
-      const srv = createServer();
-      await srv.connect(transport);
-    }
-
-    await transport.handleRequest(req, res, req.body);
-  });
-
-  // SSE pour les notifications serveur → client
-  app.get("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    if (!sessionId || !transports.has(sessionId)) {
-      res.status(404).json({ error: "Session introuvable" });
-      return;
-    }
-    await transports.get(sessionId)!.handleRequest(req, res);
-  });
-
-  app.delete("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    if (sessionId && transports.has(sessionId)) {
+    app.get("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (!sessionId || !transports.has(sessionId)) {
+        res.status(404).json({ error: "Session introuvable" });
+        return;
+      }
       await transports.get(sessionId)!.handleRequest(req, res);
-    } else {
-      res.status(404).json({ error: "Session introuvable" });
-    }
-  });
+    });
 
-  app.listen(PORT, () => {
-    console.error(`Reddit MCP server en ligne sur le port ${PORT}`);
-    console.error(`Endpoint MCP: POST /mcp`);
-  });
+    app.delete("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (sessionId && transports.has(sessionId)) {
+        await transports.get(sessionId)!.handleRequest(req, res);
+      } else {
+        res.status(404).json({ error: "Session introuvable" });
+      }
+    });
+
+    app.listen(PORT, () => {
+      console.error(`Reddit MCP server en ligne sur le port ${PORT}`);
+    });
+  } else {
+    // Mode stdio pour Claude Desktop local
+    const transport = new StdioServerTransport();
+    await createServer().connect(transport);
+    console.error("Reddit MCP server démarré (stdio)");
+  }
 }
 
 main().catch((err) => {
