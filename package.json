@@ -1,0 +1,24 @@
+{
+  "name": "reddit-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for navigating and extracting Reddit threads, comments, scores and dates",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "reddit-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
