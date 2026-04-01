@@ -847,6 +847,10 @@ async function main() {
         const s = transports.get(sessionId)!;
         s.lastSeen = Date.now();
         transport = s.transport;
+      } else if (sessionId && !transports.has(sessionId)) {
+        // Stale or unknown session — tell the client to reinitialize
+        res.status(404).json({ error: "Session expirée ou introuvable. Veuillez réinitialiser la connexion MCP." });
+        return;
       } else {
         const newSession = randomUUID();
         transport = new StreamableHTTPServerTransport({
