@@ -17,8 +17,6 @@ const BASE_URL = "https://www.reddit.com";
 const OAUTH_BASE_URL = "https://oauth.reddit.com";
 const TOKEN_URL = "https://www.reddit.com/api/v1/access_token";
 
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY ?? null;
-const CONTEXT7_API_KEY = process.env.CONTEXT7_API_KEY ?? null;
 
 // ── Cache ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +30,6 @@ const TTL = {
   search:  2 * 60_000,  // 2 min (was 5)
   post:    5 * 60_000,  // 5 min (was 1)
   user:    3 * 60_000,
-  docs:   30 * 60_000,  // 30 min for Context7 docs
 };
 
 function cacheGet(key: string): unknown | null {
@@ -131,7 +128,13 @@ function trunc(s: string, max: number): string {
 // ── HTTP helpers ───────────────────────────────────────────────────────────
 
 function formatDate(ts: number): string {
-  return new Date(ts * 1000).toISOString().replace("T", " ").substring(0, 19) + " UTC";
+  try {
+    const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return "date inconnue";
+    return d.toISOString().replace("T", " ").substring(0, 19) + " UTC";
+  } catch {
+    return "date inconnue";
+  }
 }
 
 // Rate limit tracking from Reddit response headers
@@ -168,7 +171,13 @@ async function fetchRaw(path: string, params: Record<string, string> = {}): Prom
       lastErr = new Error("Reddit rate limit hit. Please retry in a moment.");
       continue;
     }
-    if (r.status === 403) throw new Error("Accès refusé. Le subreddit est peut-être privé.");
+    if (r.status === 403) {
+      const oauthConfigured = !!(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET);
+      if (!oauthConfigured) {
+        throw new Error("Accès refusé (403). Reddit bloque les requêtes anonymes depuis les IPs cloud/datacenter. Configurez REDDIT_CLIENT_ID et REDDIT_CLIENT_SECRET pour utiliser OAuth.");
+      }
+      throw new Error("Accès refusé (403). Le subreddit est peut-être privé ou votre token OAuth n'a pas les permissions nécessaires.");
+    }
     if (r.status === 404) throw new Error("Introuvable. Vérifiez que le subreddit ou le post existe.");
     if (r.status >= 500) { lastErr = new Error(`Erreur serveur Reddit: ${r.status}`); continue; }
     if (!r.ok) throw new Error(`Erreur API Reddit: ${r.status} ${r.statusText}`);
@@ -221,14 +230,14 @@ async function fetchReddit(
 
 function parsePost(data: Record<string, unknown>): RedditPost {
   return {
-    id:                    data.id as string,
-    title:                 data.title as string,
-    author:                data.author as string,
-    subreddit:             data.subreddit as string,
-    score:                 data.score as number,
-    upvote_ratio:          data.upvote_ratio as number,
-    num_comments:          data.num_comments as number,
-    permalink:             `https://www.reddit.com${data.permalink as string}`,
+    id:                    (data.id as string) || "",
+    title:                 (data.title as string) || "(sans titre)",
+    author:                (data.author as string) || "[deleted]",
+    subreddit:             (data.subreddit as string) || "",
+    score:                 (data.score as number) || 0,
+    upvote_ratio:          (data.upvote_ratio as number) || 0,
+    num_comments:          (data.num_comments as number) || 0,
+    permalink:             data.permalink ? `https://www.reddit.com${data.permalink as string}` : "",
     selftext:              (data.selftext as string) || "",
     created_date:          formatDate(data.created_utc as number),
     link_flair_text:       (data.link_flair_text as string | null) ?? null,
@@ -259,10 +268,10 @@ function parseComment(data: Record<string, unknown>, depth = 0, maxDepth = 6): R
   }
 
   return {
-    id:                    d.id as string,
+    id:                    (d.id as string) || "",
     author:                (d.author as string) || "[deleted]",
     body:                  trunc(d.body as string, BODY_MAX),
-    score:                 d.score as number,
+    score:                 (d.score as number) || 0,
     created_date:          formatDate(d.created_utc as number),
     depth,
     replies,
@@ -347,7 +356,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "search_reddit",
-    description: "Recherche des posts sur Reddit (global ou dans un subreddit).",
+    description: "Recherche des posts sur Reddit (global ou dans un subreddit). Pour des sujets techniques ou pointus, toujours spécifier un subreddit — la recherche globale sort=top remonte les posts les plus votés de tout Reddit sans égard à la pertinence.",
     inputSchema: {
       type: "object",
       properties: {
@@ -386,33 +395,6 @@ const TOOLS: Tool[] = [
         limit: { type: "number", description: "Nombre d'éléments (1-100, défaut: 25)" },
       },
       required: ["username"],
-    },
-  },
-  {
-    name: "search_web",
-    description: "Recherche web via Tavily pour obtenir du contexte externe sur des sujets Reddit, vérifier des affirmations ou trouver des sources récentes. Requiert TAVILY_API_KEY.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query:        { type: "string", description: "Requête de recherche" },
-        max_results:  { type: "number", description: "Nombre de résultats (1-10, défaut: 5)" },
-        search_depth: { type: "string", enum: ["basic", "advanced"], description: "Profondeur de recherche (défaut: basic)" },
-        topic:        { type: "string", enum: ["general", "news"], description: "Type de sujet (défaut: general)" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "search_docs",
-    description: "Recherche de documentation officielle via Context7 pour des bibliothèques/frameworks/outils mentionnés dans des posts Reddit (React, Python, Next.js, Docker, etc.).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        library:    { type: "string", description: "Nom de la bibliothèque ou du framework (ex: 'react', 'nextjs', 'python', 'docker')" },
-        query:      { type: "string", description: "Question ou sujet spécifique dans cette bibliothèque" },
-        max_tokens: { type: "number", description: "Taille max du contenu retourné (100-5000, défaut: 3000)" },
-      },
-      required: ["library", "query"],
     },
   },
 ];
@@ -632,138 +614,6 @@ async function handleGetUserPosts(args: Record<string, unknown>): Promise<string
   return lines.join("\n");
 }
 
-async function handleSearchWeb(args: Record<string, unknown>): Promise<string> {
-  if (!TAVILY_API_KEY) {
-    return "Erreur: TAVILY_API_KEY non configuré. Définissez cette variable d'environnement pour utiliser search_web.";
-  }
-
-  const query       = args.query as string;
-  const maxResults  = Math.min(Math.max(Number(args.max_results) || 5, 1), 10);
-  const searchDepth = (args.search_depth as string) || "basic";
-  const topic       = (args.topic as string) || "general";
-
-  const resp = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${TAVILY_API_KEY}`,
-    },
-    body: JSON.stringify({
-      query,
-      max_results: maxResults,
-      search_depth: searchDepth,
-      topic,
-      include_answer: false,
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  if (!resp.ok) {
-    if (resp.status === 401) return "Erreur: Clé API Tavily invalide ou expirée.";
-    if (resp.status === 429) return "Erreur: Limite de taux Tavily atteinte. Réessayez dans un moment.";
-    return `Erreur Tavily: ${resp.status} ${resp.statusText}`;
-  }
-
-  interface TavilyResult { title: string; url: string; content: string; score?: number; }
-  interface TavilyResponse { results: TavilyResult[]; query: string; }
-
-  const data = await resp.json() as TavilyResponse;
-
-  if (!data.results?.length) return `Aucun résultat web pour "${query}".`;
-
-  const lines: string[] = [
-    `# Résultats web: "${query}"`,
-    `${data.results.length} résultat(s) via Tavily\n`,
-  ];
-
-  for (let i = 0; i < data.results.length; i++) {
-    const r = data.results[i];
-    lines.push(
-      `### ${i + 1}. ${r.title}`,
-      `- **URL**: ${r.url}`,
-      `- ${trunc(r.content, 500)}`,
-      ""
-    );
-  }
-
-  return lines.join("\n");
-}
-
-async function handleSearchDocs(args: Record<string, unknown>): Promise<string> {
-  const library   = args.library as string;
-  const query     = args.query as string;
-  const maxTokens = Math.min(Math.max(Number(args.max_tokens) || 3000, 100), 5000);
-
-  const cacheKey = ck("docs", library, query, maxTokens);
-  const cached = cacheGet(cacheKey);
-  if (cached !== null && typeof cached === "string") return cached;
-
-  const c7Headers: Record<string, string> = { Accept: "application/json" };
-  if (CONTEXT7_API_KEY) c7Headers["Authorization"] = `Bearer ${CONTEXT7_API_KEY}`;
-
-  // Step 1: Resolve library ID
-  const resolveUrl = new URL("https://mcp.context7.com/v1/libraries");
-  resolveUrl.searchParams.set("query", library);
-
-  const resolveResp = await fetch(resolveUrl.toString(), {
-    headers: c7Headers,
-    signal: AbortSignal.timeout(10_000),
-  });
-
-  if (!resolveResp.ok) {
-    if (resolveResp.status === 401) return "Erreur: Clé API Context7 invalide.";
-    return `Erreur Context7 (résolution): ${resolveResp.status} ${resolveResp.statusText}`;
-  }
-
-  interface C7Library { id: string; name: string; description?: string; }
-  interface C7ResolveResponse { libraries?: C7Library[]; results?: C7Library[]; }
-
-  const resolved = await resolveResp.json() as C7ResolveResponse;
-  const libs = Array.isArray(resolved.libraries) ? resolved.libraries :
-               Array.isArray(resolved.results) ? resolved.results : [];
-  if (!libs.length) {
-    return `Aucune bibliothèque trouvée pour "${library}" dans Context7. Essayez un nom plus précis (ex: "react", "vue", "django").`;
-  }
-
-  const libraryId = libs[0].id;
-  const libraryName = libs[0].name;
-
-  // Step 2: Query docs
-  const docsUrl = new URL(`https://mcp.context7.com/v1/libraries/${encodeURIComponent(libraryId)}/docs`);
-  docsUrl.searchParams.set("query", query);
-  docsUrl.searchParams.set("maxTokens", maxTokens.toString());
-
-  const docsResp = await fetch(docsUrl.toString(), {
-    headers: c7Headers,
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  if (!docsResp.ok) {
-    return `Erreur Context7 (docs): ${docsResp.status} ${docsResp.statusText}`;
-  }
-
-  interface C7DocsResponse { content?: string; text?: string; }
-  const docs = await docsResp.json() as C7DocsResponse;
-  const content = docs.content ?? docs.text ?? "";
-
-  if (!content) {
-    return `Aucune documentation trouvée pour "${query}" dans ${libraryName}.`;
-  }
-
-  const result = [
-    `# Documentation: ${libraryName}`,
-    `**Source**: Context7 (https://context7.com)`,
-    `**Requête**: ${query}`,
-    `**Bibliothèque ID**: \`${libraryId}\``,
-    "",
-    "---",
-    "",
-    content,
-  ].join("\n");
-
-  cacheSet(cacheKey, result, TTL.docs);
-  return result;
-}
 
 // ── Server factory ─────────────────────────────────────────────────────────
 
@@ -783,8 +633,6 @@ function createServer() {
         case "search_reddit":          result = await handleSearchReddit(args as Record<string, unknown>); break;
         case "get_subreddit_info":     result = await handleGetSubredditInfo(args as Record<string, unknown>); break;
         case "get_user_posts":         result = await handleGetUserPosts(args as Record<string, unknown>); break;
-        case "search_web":             result = await handleSearchWeb(args as Record<string, unknown>); break;
-        case "search_docs":            result = await handleSearchDocs(args as Record<string, unknown>); break;
         default: throw new Error(`Outil inconnu: ${name}`);
       }
       return { content: [{ type: "text", text: result }] };
@@ -801,19 +649,12 @@ function createServer() {
 const startTime = Date.now();
 
 async function main() {
-  if (!TAVILY_API_KEY) {
-    console.error("Avertissement: TAVILY_API_KEY non défini — search_web non fonctionnel.");
-  }
-  if (!CONTEXT7_API_KEY) {
-    console.error("Info: CONTEXT7_API_KEY non défini — search_docs fonctionne sans clé (limite de débit réduite).");
-  }
-
   if (process.env.PORT) {
     const PORT = parseInt(process.env.PORT || "3000", 10);
     if (Number.isNaN(PORT) || PORT < 1 || PORT > 65535) throw new Error(`PORT invalide: ${process.env.PORT}`);
     const app = express();
     app.use(compression());
-    app.use(express.json());
+    app.use(express.json({ limit: "1mb" }));
 
     app.get("/", (_req, res) => {
       res.json({
@@ -823,8 +664,6 @@ async function main() {
         uptime_s: Math.floor((Date.now() - startTime) / 1000),
         cache_entries: cache.size,
         reddit_oauth: !!(process.env.REDDIT_CLIENT_ID),
-        tavily_configured: !!TAVILY_API_KEY,
-        context7_configured: !!CONTEXT7_API_KEY,
         rate_limit_remaining: rlRemaining,
       });
     });
