@@ -168,7 +168,11 @@ async function fetchRaw(path: string, params: Record<string, string> = {}): Prom
       lastErr = new Error("Reddit rate limit hit. Please retry in a moment.");
       continue;
     }
-    if (r.status === 403) throw new Error("Accès refusé. Le subreddit est peut-être privé.");
+    if (r.status === 403) throw new Error(
+      tok
+        ? "Accès refusé (403). Le subreddit est peut-être privé ou restreint."
+        : "Accès refusé (403). L'accès anonyme est probablement bloqué depuis ce serveur. Configurez REDDIT_CLIENT_ID et REDDIT_CLIENT_SECRET pour activer l'authentification OAuth Reddit."
+    );
     if (r.status === 404) throw new Error("Introuvable. Vérifiez que le subreddit ou le post existe.");
     if (r.status >= 500) { lastErr = new Error(`Erreur serveur Reddit: ${r.status}`); continue; }
     if (!r.ok) throw new Error(`Erreur API Reddit: ${r.status} ${r.statusText}`);
