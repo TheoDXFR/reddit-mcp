@@ -464,6 +464,7 @@ async function handleGetSubredditPosts(args: Record<string, unknown>): Promise<s
 
 async function handleGetPostWithComments(args: Record<string, unknown>): Promise<string> {
   let url = args.post_url as string;
+  if (!url || typeof url !== "string") throw new Error("Erreur: post_url est requis et doit être une chaîne de caractères.");
   const sortComments = (args.sort_comments as string) || "best";
   const limitComments = Math.min(Math.max(Number(args.limit_comments) || 100, 1), 500);
   const maxDepth = Math.min(Math.max(Number(args.depth) || 6, 1), 10);
